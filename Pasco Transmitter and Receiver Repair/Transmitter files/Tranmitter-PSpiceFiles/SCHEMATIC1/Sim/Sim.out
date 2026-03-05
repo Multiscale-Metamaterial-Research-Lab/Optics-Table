@@ -1,0 +1,84 @@
+
+**** 03/25/25 21:48:16 *** PSpice 24.1.0 (4 September 2024) *** ID# 0 ********
+
+ ** Profile: "SCHEMATIC1-Sim"  [ C:\Users\kyles\OneDrive - University of Hartford\Multiscale Metamaterial Research Laboratory\Transmi
+
+
+ ****     CIRCUIT DESCRIPTION
+
+
+******************************************************************************
+
+
+
+
+** Creating circuit file "Sim.cir" 
+** WARNING: THIS AUTOMATICALLY GENERATED FILE MAY BE OVERWRITTEN BY SUBSEQUENT SIMULATIONS
+
+*Libraries: 
+* Profile Libraries :
+* Local Libraries :
+* From [PSPICE NETLIST] section of E:\Apps\cdssetup\OrCAD_PSpice\24.1.0\PSpice.ini file:
+.lib "nom.lib" 
+
+*Analysis directives: 
+.TRAN  0 1000ns 0 
+.OPTIONS ADVCONV
+.PROBE64 V(alias(*)) I(alias(*)) W(alias(*)) D(alias(*)) NOISE(alias(*)) 
+.INC "..\SCHEMATIC1.net" 
+
+
+
+**** INCLUDING SCHEMATIC1.net ****
+* source TRANMITTER
+V_V1         N00492 N00560 9Vdc
+R_R1         N00545 N00492  470 TC=0,0 
+R_R2         N00560 N00553  1.3k TC=0,0 
+R_R3         N00549 N00553  220 TC=0,0 
+X_U1         N00492 N00553 N00549 LM317
+X_D1         N00545 N00560 LED PARAMS: IS=1.7603e-27 RS=2  BV=5 IBV=10e-6      
++    
+C_C1         N00560 N00553  .1pf  TC=0,0 
+X_D2         N00553 N00560 BAT62-02w/INF
+
+**** RESUMING Sim.cir ****
+.END
+
+ERROR(ORPSIM-15142): Node N00492 is floating
+
+ERROR(ORPSIM-15142): Node N00560 is floating
+
+ERROR(ORPSIM-15142): Node N00545 is floating
+
+ERROR(ORPSIM-15142): Node N00553 is floating
+
+ERROR(ORPSIM-15142): Node N00549 is floating
+
+ERROR(ORPSIM-15142): Node X_U1.4 is floating
+
+ERROR(ORPSIM-15142): Node X_U1.13 is floating
+
+ERROR(ORPSIM-15142): Node X_U1.15 is floating
+
+ERROR(ORPSIM-15142): Node X_U1.5 is floating
+
+ERROR(ORPSIM-15142): Node X_U1.7 is floating
+
+ERROR(ORPSIM-15142): Node X_U1.6 is floating
+
+ERROR(ORPSIM-15142): Node X_U1.11 is floating
+
+ERROR(ORPSIM-15142): Node X_U1.12 is floating
+
+ERROR(ORPSIM-15142): Node X_U1.8 is floating
+
+ERROR(ORPSIM-15142): Node X_U1.9 is floating
+
+ERROR(ORPSIM-15142): Node X_U1.10 is floating
+
+ERROR(ORPSIM-15142): Node X_D2.1 is floating
+
+ERROR(ORPSIM-15142): Node X_D2.10 is floating
+
+ERROR(ORPSIM-15142): Node X_D2.2 is floating
+
