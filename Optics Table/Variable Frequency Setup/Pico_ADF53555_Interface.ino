@@ -8,6 +8,7 @@ static const int A_SCLK = 18;
 static const int A_MOSI = 19;
 static const int A_LE   = 20;
 static const int A_CE   = 17;
+static const int A_MUX  = 22;   // MUXOUT from Board A -> Pico GPIO 22
 
 // =====================================================
 // Board B (SPI1)
@@ -16,6 +17,7 @@ static const int B_SCLK = 10;
 static const int B_MOSI = 11;
 static const int B_LE   = 12;
 static const int B_CE   = 13;
+static const int B_MUX  = 26;   // MUXOUT from Board B -> Pico GPIO 26
 
 // =====================================================
 // Unused pins for RP2040 SPI constructor
@@ -91,6 +93,67 @@ int getActiveCE()
   return (activeBoard == BOARD_A) ? A_CE : B_CE;
 }
 
+int getActiveMUX()
+{
+  return (activeBoard == BOARD_A) ? A_MUX : B_MUX;
+}
+
+int readActiveLock()
+{
+  return digitalRead(getActiveMUX());
+}
+
+int readBoardALock()
+{
+  return digitalRead(A_MUX);
+}
+
+int readBoardBLock()
+{
+  return digitalRead(B_MUX);
+}
+
+bool waitForLock(int muxPin, unsigned long timeoutMs)
+{
+  unsigned long start = millis();
+  while ((millis() - start) < timeoutMs)
+  {
+    if (digitalRead(muxPin))
+    {
+      return true;
+    }
+    delay(1);
+  }
+  return false;
+}
+
+void printActiveLockStatus(const char* prefix)
+{
+  bool locked = waitForLock(getActiveMUX(), 100);
+
+  Serial.print(prefix);
+  Serial.print(":");
+  Serial.print((activeBoard == BOARD_A) ? "A:" : "B:");
+  Serial.println(locked ? "LOCKED" : "UNLOCKED");
+}
+
+void dumpActiveRegs()
+{
+  uint32_t* regs = getRegs();
+
+  Serial.print("DUMP:");
+  Serial.println((activeBoard == BOARD_A) ? "A" : "B");
+
+  for (int i = 0; i <= 12; i++)
+  {
+    Serial.print("R");
+    if (i < 10) Serial.print("0");
+    Serial.print(i);
+    Serial.print("=0x");
+    Serial.println(regs[i], HEX);
+  }
+}
+
 // =====================================================
 // Forward declarations
 // =====================================================
@@ -115,6 +178,9 @@ void setup()
   pinMode(A_CE, OUTPUT);
   pinMode(B_LE, OUTPUT);
   pinMode(B_CE, OUTPUT);
+
+  pinMode(A_MUX, INPUT);
+  pinMode(B_MUX, INPUT);
 
   digitalWrite(A_LE, HIGH);
   digitalWrite(B_LE, HIGH);
@@ -158,6 +224,8 @@ void loop()
     {
       String regNum = inputString.substring(5, 7);
       writeRegs(regNum);
+      Serial.print("OK:REGS:");
+      Serial.println(regNum);
     }
     else if (commandString.equals("INIT"))
     {
@@ -171,18 +239,24 @@ void loop()
     {
       String regNum = inputString.substring(5, 7);
       writeRegsHop(regNum);
+      Serial.print("OK:HOPS:");
+      Serial.println(regNum);
     }
     else if (commandString.equals("HOPD"))
     {
       char charBuf[inputString.length() - 6];
       inputString.substring(5, inputString.length() - 1).toCharArray(charBuf, inputString.length() - 6);
       msDelay = strtoul(charBuf, NULL, 0);
+      Serial.print("OK:HOPD:");
+      Serial.println(msDelay);
     }
     else if (commandString.equals("HOPC"))
     {
       char charBuf[inputString.length() - 6];
       inputString.substring(5, inputString.length() - 1).toCharArray(charBuf, inputString.length() - 6);
       hopCycles = strtoul(charBuf, NULL, 0);
+      Serial.print("OK:HOPC:");
+      Serial.println(hopCycles);
     }
     else if (commandString.equals("HOPB"))
     {
@@ -194,23 +268,23 @@ void loop()
         delay(msDelay);
       }
 
-      for (int i = 0; i < 20; i++)
-      {
-        Serial.write("STPH");
-      }
-      Serial.println();
+      printActiveLockStatus("HOPB");
     }
     else if (commandString.equals("EXTI"))
     {
       char charBuf[inputString.length() - 6];
       inputString.substring(5, inputString.length() - 1).toCharArray(charBuf, inputString.length() - 6);
       extIntMin = (int)strtoul(charBuf, NULL, 0);
+      Serial.print("OK:EXTI:");
+      Serial.println(extIntMin);
     }
     else if (commandString.equals("EXTT"))
     {
       char charBuf[inputString.length() - 6];
       inputString.substring(5, inputString.length() - 1).toCharArray(charBuf, inputString.length() - 6);
       extTime = strtoul(charBuf, NULL, 0);
+      Serial.print("OK:EXTT:");
+      Serial.println(extTime);
     }
     else if (commandString.equals("EXTS"))
     {
@@ -233,11 +307,23 @@ void loop()
         delay(10);
       }
 
-      for (int i = 0; i < 20; i++)
-      {
-        Serial.write("STPH");
-      }
-      Serial.println();
+      printActiveLockStatus("EXTS");
+    }
+    else if (commandString.equals("LOCK"))
+    {
+      Serial.print("LOCK:A=");
+      Serial.print(readBoardALock());
+      Serial.print(":B=");
+      Serial.println(readBoardBLock());
+    }
+    else if (commandString.equals("DUMP"))
+    {
+      dumpActiveRegs();
+    }
+    else
+    {
+      Serial.print("ERR:UNKNOWN:");
+      Serial.println(commandString);
     }
 
     inputString = "";
@@ -332,6 +418,8 @@ void setADF5355()
 
   delayMicroseconds(delayVCO);
   WriteRegister32(regs[0]);
+
+  printActiveLockStatus("INIT");
 }
 
 void updateADF5355()
@@ -350,6 +438,8 @@ void updateADF5355()
   delayMicroseconds(delayVCO);
   regs[0] |= (1UL << 21);
   WriteRegister32(regs[0]);                 // R0 DB21=1
+
+  printActiveLockStatus("FREQ");
 }
 
 void hopUpdateADF5355()
@@ -368,6 +458,8 @@ void hopUpdateADF5355()
   delayMicroseconds(delayVCO);
   regsHop[0] |= (1UL << 21);
   WriteRegister32(regsHop[0]);              // R0 DB21=1
+
+  printActiveLockStatus("HOPF");
 }
 
 // =====================================================
