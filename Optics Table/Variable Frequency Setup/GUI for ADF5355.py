@@ -1,3 +1,7 @@
+# =============================================================================
+# ADF5355 Dual Board Controller (Revised)
+# =============================================================================
+
 import math
 import time
 import threading
@@ -14,8 +18,7 @@ try:
 except ImportError:
     serial = None
 
-
-MOD1 = 1 << 24
+MOD1 = 1 << 24  # 16777216
 
 
 @dataclass
@@ -51,16 +54,19 @@ class PicoADF5355:
             raise RuntimeError("pyserial is not installed. Run: pip install pyserial")
         self.ser = serial.Serial(port, baudrate=baudrate, timeout=timeout)
         time.sleep(2.0)
+        try:
+            self.ser.reset_input_buffer()
+            self.ser.reset_output_buffer()
+        except Exception:
+            pass
 
     def close(self):
         if self.ser and self.ser.is_open:
             self.ser.close()
 
     def _send(self, cmd: str):
-        if not cmd.endswith("
-"):
-            cmd += "
-"
+        if not cmd.endswith("\n"):
+            cmd += "\n"
         self.ser.write(cmd.encode("ascii"))
         self.ser.flush()
 
@@ -188,7 +194,13 @@ class ADF5355RegisterBuilder:
 
         return int_val, frac1, frac2, mod2
 
-    def build_registers(self, output_freq_hz: float, output: Literal["A", "B"] = "B", output_power_code: Optional[int] = None, channel_spacing_hz: float = 1.0) -> List[int]:
+    def build_registers(
+        self,
+        output_freq_hz: float,
+        output: Literal["A", "B"] = "B",
+        output_power_code: Optional[int] = None,
+        channel_spacing_hz: float = 1.0,
+    ) -> List[int]:
         fpfd = self.f_pfd()
 
         if output.upper() == "B":
@@ -200,6 +212,7 @@ class ADF5355RegisterBuilder:
             rfoutb_disable_bit = 0
             feedback_fundamental = True
             target_n = vco_hz / fpfd
+
         elif output.upper() == "A":
             if not (53.125e6 <= output_freq_hz <= 6.8e9):
                 raise ValueError("RFOUTA must be between 53.125 MHz and 6.8 GHz")
@@ -216,10 +229,12 @@ class ADF5355RegisterBuilder:
             raise ValueError("Computed VCO is outside 3.4 to 6.8 GHz")
 
         int_val, frac1, frac2, mod2 = self._calc_int_frac(target_n, channel_spacing_hz)
-        prescaler_89 = int_val >= 75
 
+        prescaler_89 = int_val >= 75
         if (not prescaler_89) and int_val < 23:
-            raise ValueError(f"INT too low ({int_val}) for 4/5 prescaler. Increase PFD or choose different settings.")
+            raise ValueError(
+                f"INT too low ({int_val}) for 4/5 prescaler. Increase PFD or choose different settings."
+            )
 
         regs = [0] * 13
 
@@ -328,21 +343,34 @@ class ADF5355RegisterBuilder:
         r12 |= 0x00000810
         r12 |= 0xC
         regs[12] = r12
+
         return regs
 
-    def calculate_summary(self, output_freq_hz: float, output: Literal["A", "B"] = "B", channel_spacing_hz: float = 1.0) -> dict:
+    def calculate_summary(
+        self,
+        output_freq_hz: float,
+        output: Literal["A", "B"] = "B",
+        channel_spacing_hz: float = 1.0,
+    ) -> dict:
         fpfd = self.f_pfd()
+
         if output.upper() == "B":
+            if not (6.8e9 <= output_freq_hz <= 13.6e9):
+                raise ValueError("RFOUTB must be between 6.8 GHz and 13.6 GHz")
             vco_hz = output_freq_hz / 2.0
             rf_divider = 1
             feedback_mode = "fundamental"
             target_n = vco_hz / fpfd
         else:
+            if not (53.125e6 <= output_freq_hz <= 6.8e9):
+                raise ValueError("RFOUTA must be between 53.125 MHz and 6.8 GHz")
             rf_divider = self._choose_rf_divider_for_rfouta(output_freq_hz)
             vco_hz = output_freq_hz * rf_divider
             feedback_mode = "divided"
             target_n = output_freq_hz / fpfd
+
         int_val, frac1, frac2, mod2 = self._calc_int_frac(target_n, channel_spacing_hz)
+
         return {
             "output_path": f"RFOUT{output.upper()}",
             "requested_hz": output_freq_hz,
@@ -361,24 +389,31 @@ class ADF5355DualGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("ADF5355 Dual Board Controller")
-        self.geometry("1320x860")
-        self.minsize(1180, 760)
+        self.geometry("1360x900")
+        self.minsize(1200, 780)
 
-        self.pico = None
-        self.current_regs = [0] * 13
-        self.serial_queue = queue.Queue()
+        self.pico: Optional[PicoADF5355] = None
+        self.current_regs: List[int] = [0] * 13
+        self.serial_queue: queue.Queue = queue.Queue()
+        self.recalc_after_id = None
+        self.last_valid_settings = None
+        self.last_recalc_error = None
 
         self.style = ttk.Style(self)
         try:
             self.style.theme_use("clam")
         except Exception:
             pass
+
         self.style.configure("LockOn.TLabel", foreground="#0a7d22")
         self.style.configure("LockOff.TLabel", foreground="#b22222")
         self.style.configure("LockUnknown.TLabel", foreground="#6b7280")
+        self.style.configure("Warning.TLabel", foreground="#b45309")
 
         self._build_vars()
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
         self.refresh_ports()
         self.recalculate()
         self.after(150, self.process_serial_queue)
@@ -388,13 +423,16 @@ class ADF5355DualGUI(tk.Tk):
         self.status_var = tk.StringVar(value="Disconnected")
         self.lock_a_var = tk.StringVar(value="A: ?")
         self.lock_b_var = tk.StringVar(value="B: ?")
+
         self.board_var = tk.StringVar(value="A")
         self.output_var = tk.StringVar(value="B")
+
         self.freq_var = tk.StringVar(value="10.525")
         self.units_var = tk.StringVar(value="GHz")
         self.channel_spacing_var = tk.StringVar(value="1")
         self.channel_spacing_units_var = tk.StringVar(value="Hz")
-        self.first_init_var = tk.BooleanVar(value=True)
+
+        self.force_init_var = tk.BooleanVar(value=True)
 
         self.ref_freq_var = tk.StringVar(value="100")
         self.ref_units_var = tk.StringVar(value="MHz")
@@ -423,19 +461,29 @@ class ADF5355DualGUI(tk.Tk):
             "mod2": tk.StringVar(),
         }
 
-        self.log_var = tk.StringVar(value="Ready.")
+        self.mux_warning_var = tk.StringVar(value="")
 
     def _build_ui(self):
         top = ttk.Frame(self, padding=10)
         top.pack(fill="x")
 
         ttk.Label(top, text="ADF5355 Dual Board Controller", font=("Segoe UI", 16, "bold")).pack(side="left")
+
         status_frame = ttk.Frame(top)
         status_frame.pack(side="right")
-        self.lock_a_label = ttk.Label(status_frame, textvariable=self.lock_a_var, font=("Segoe UI", 10, "bold"), style="LockUnknown.TLabel")
+
+        self.lock_a_label = ttk.Label(
+            status_frame, textvariable=self.lock_a_var,
+            font=("Segoe UI", 10, "bold"), style="LockUnknown.TLabel"
+        )
         self.lock_a_label.pack(side="right", padx=(8, 0))
-        self.lock_b_label = ttk.Label(status_frame, textvariable=self.lock_b_var, font=("Segoe UI", 10, "bold"), style="LockUnknown.TLabel")
+
+        self.lock_b_label = ttk.Label(
+            status_frame, textvariable=self.lock_b_var,
+            font=("Segoe UI", 10, "bold"), style="LockUnknown.TLabel"
+        )
         self.lock_b_label.pack(side="right", padx=(8, 0))
+
         ttk.Label(status_frame, textvariable=self.status_var, font=("Segoe UI", 11)).pack(side="right", padx=(8, 0))
 
         main = ttk.Panedwindow(self, orient="horizontal")
@@ -451,7 +499,6 @@ class ADF5355DualGUI(tk.Tk):
         self._build_summary_frame(left)
         self._build_actions_frame(left)
         self._build_log_frame(left)
-
         self._build_registers_frame(right)
 
     def _build_connection_frame(self, parent):
@@ -466,63 +513,88 @@ class ADF5355DualGUI(tk.Tk):
         ttk.Button(frm, text="Disconnect", command=self.disconnect_port).grid(row=0, column=4, padx=4)
 
         ttk.Label(frm, text="Board").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        ttk.Radiobutton(frm, text="Board A", variable=self.board_var, value="A", command=self.on_param_change).grid(row=1, column=1, sticky="w", pady=(8, 0))
-        ttk.Radiobutton(frm, text="Board B", variable=self.board_var, value="B", command=self.on_param_change).grid(row=1, column=2, sticky="w", pady=(8, 0))
+        ttk.Radiobutton(frm, text="Board A", variable=self.board_var, value="A",
+                        command=self.on_param_change).grid(row=1, column=1, sticky="w", pady=(8, 0))
+        ttk.Radiobutton(frm, text="Board B", variable=self.board_var, value="B",
+                        command=self.on_param_change).grid(row=1, column=2, sticky="w", pady=(8, 0))
 
     def _build_synth_frame(self, parent):
         frm = ttk.LabelFrame(parent, text="Synthesizer Setup", padding=10)
         frm.pack(fill="x", pady=(0, 8))
 
         r = 0
+
         ttk.Label(frm, text="Output Path").grid(row=r, column=0, sticky="w")
-        ttk.Radiobutton(frm, text="RFOUTA", variable=self.output_var, value="A", command=self.on_param_change).grid(row=r, column=1, sticky="w")
-        ttk.Radiobutton(frm, text="RFOUTB", variable=self.output_var, value="B", command=self.on_param_change).grid(row=r, column=2, sticky="w")
+        ttk.Radiobutton(frm, text="RFOUTA", variable=self.output_var, value="A",
+                        command=self.on_param_change).grid(row=r, column=1, sticky="w")
+        ttk.Radiobutton(frm, text="RFOUTB", variable=self.output_var, value="B",
+                        command=self.on_param_change).grid(row=r, column=2, sticky="w")
 
         r += 1
         ttk.Label(frm, text="Output Frequency").grid(row=r, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(frm, textvariable=self.freq_var, width=16).grid(row=r, column=1, sticky="w", pady=(8, 0))
-        ttk.Combobox(frm, textvariable=self.units_var, values=["Hz", "kHz", "MHz", "GHz"], width=8, state="readonly").grid(row=r, column=2, sticky="w", pady=(8, 0))
+        ttk.Combobox(frm, textvariable=self.units_var, values=["Hz", "kHz", "MHz", "GHz"],
+                     width=8, state="readonly").grid(row=r, column=2, sticky="w", pady=(8, 0))
 
         r += 1
         ttk.Label(frm, text="Channel Spacing").grid(row=r, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(frm, textvariable=self.channel_spacing_var, width=16).grid(row=r, column=1, sticky="w", pady=(8, 0))
-        ttk.Combobox(frm, textvariable=self.channel_spacing_units_var, values=["Hz", "kHz", "MHz"], width=8, state="readonly").grid(row=r, column=2, sticky="w", pady=(8, 0))
+        ttk.Combobox(frm, textvariable=self.channel_spacing_units_var, values=["Hz", "kHz", "MHz"],
+                     width=8, state="readonly").grid(row=r, column=2, sticky="w", pady=(8, 0))
 
         r += 1
         ttk.Label(frm, text="Reference Frequency").grid(row=r, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(frm, textvariable=self.ref_freq_var, width=16).grid(row=r, column=1, sticky="w", pady=(8, 0))
-        ttk.Combobox(frm, textvariable=self.ref_units_var, values=["Hz", "kHz", "MHz", "GHz"], width=8, state="readonly").grid(row=r, column=2, sticky="w", pady=(8, 0))
+        ttk.Combobox(frm, textvariable=self.ref_units_var, values=["Hz", "kHz", "MHz", "GHz"],
+                     width=8, state="readonly").grid(row=r, column=2, sticky="w", pady=(8, 0))
 
         r += 1
         ttk.Label(frm, text="R Counter").grid(row=r, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(frm, textvariable=self.r_counter_var, width=16).grid(row=r, column=1, sticky="w", pady=(8, 0))
 
         r += 1
-        ttk.Checkbutton(frm, text="Reference Doubler", variable=self.ref_doubler_var, command=self.on_param_change).grid(row=r, column=0, sticky="w", pady=(8, 0))
-        ttk.Checkbutton(frm, text="Reference ÷2", variable=self.ref_div2_var, command=self.on_param_change).grid(row=r, column=1, sticky="w", pady=(8, 0))
-        ttk.Checkbutton(frm, text="Differential Reference", variable=self.ref_diff_var, command=self.on_param_change).grid(row=r, column=2, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(frm, text="Reference Doubler", variable=self.ref_doubler_var,
+                        command=self.on_param_change).grid(row=r, column=0, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(frm, text="Reference ÷2", variable=self.ref_div2_var,
+                        command=self.on_param_change).grid(row=r, column=1, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(frm, text="Differential Reference", variable=self.ref_diff_var,
+                        command=self.on_param_change).grid(row=r, column=2, sticky="w", pady=(8, 0))
 
         r += 1
         ttk.Label(frm, text="RFOUTA Power").grid(row=r, column=0, sticky="w", pady=(8, 0))
-        ttk.Combobox(frm, textvariable=self.rfouta_power_var, values=["-4 dBm", "-1 dBm", "+2 dBm", "+5 dBm"], width=12, state="readonly").grid(row=r, column=1, sticky="w", pady=(8, 0))
+        ttk.Combobox(frm, textvariable=self.rfouta_power_var,
+                     values=["-4 dBm", "-1 dBm", "+2 dBm", "+5 dBm"],
+                     width=12, state="readonly").grid(row=r, column=1, sticky="w", pady=(8, 0))
 
         r += 1
         ttk.Label(frm, text="Charge Pump Code").grid(row=r, column=0, sticky="w", pady=(8, 0))
-        ttk.Combobox(frm, textvariable=self.cp_code_var, values=["0b0000", "0b0001", "0b0010", "0b0011", "0b0100", "0b0101", "0b0110", "0b0111", "0b1000", "0b1001", "0b1010", "0b1011", "0b1100", "0b1101", "0b1110", "0b1111"], width=12, state="readonly").grid(row=r, column=1, sticky="w", pady=(8, 0))
+        ttk.Combobox(frm, textvariable=self.cp_code_var,
+                     values=[f"0b{i:04b}" for i in range(16)],
+                     width=12, state="readonly").grid(row=r, column=1, sticky="w", pady=(8, 0))
 
         r += 1
         ttk.Label(frm, text="MUXOUT Code").grid(row=r, column=0, sticky="w", pady=(8, 0))
-        ttk.Combobox(frm, textvariable=self.muxout_var, values=["000", "001", "010", "011", "100", "101", "110"], width=12, state="readonly").grid(row=r, column=1, sticky="w", pady=(8, 0))
+        ttk.Combobox(frm, textvariable=self.muxout_var,
+                     values=["000", "001", "010", "011", "100", "101", "110"],
+                     width=12, state="readonly").grid(row=r, column=1, sticky="w", pady=(8, 0))
 
         r += 1
-        ttk.Checkbutton(frm, text="Mute Till Lock Detect", variable=self.mtld_var, command=self.on_param_change).grid(row=r, column=0, sticky="w", pady=(8, 0))
-        ttk.Checkbutton(frm, text="Negative Bleed", variable=self.neg_bleed_var, command=self.on_param_change).grid(row=r, column=1, sticky="w", pady=(8, 0))
-        ttk.Checkbutton(frm, text="Gated Bleed", variable=self.gated_bleed_var, command=self.on_param_change).grid(row=r, column=2, sticky="w", pady=(8, 0))
+        self.mux_warning_label = ttk.Label(frm, textvariable=self.mux_warning_var, style="Warning.TLabel")
+        self.mux_warning_label.grid(row=r, column=0, columnspan=3, sticky="w", pady=(2, 0))
+
+        r += 1
+        ttk.Checkbutton(frm, text="Mute Till Lock Detect", variable=self.mtld_var,
+                        command=self.on_param_change).grid(row=r, column=0, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(frm, text="Negative Bleed", variable=self.neg_bleed_var,
+                        command=self.on_param_change).grid(row=r, column=1, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(frm, text="Gated Bleed", variable=self.gated_bleed_var,
+                        command=self.on_param_change).grid(row=r, column=2, sticky="w", pady=(8, 0))
 
         r += 1
         ttk.Label(frm, text="Bleed Code").grid(row=r, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(frm, textvariable=self.bleed_code_var, width=16).grid(row=r, column=1, sticky="w", pady=(8, 0))
-        ttk.Checkbutton(frm, text="LE Sync", variable=self.le_sync_var, command=self.on_param_change).grid(row=r, column=2, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(frm, text="LE Sync", variable=self.le_sync_var,
+                        command=self.on_param_change).grid(row=r, column=2, sticky="w", pady=(8, 0))
 
         for child in frm.winfo_children():
             if isinstance(child, (ttk.Entry, ttk.Combobox)):
@@ -543,25 +615,30 @@ class ADF5355DualGUI(tk.Tk):
             ("FRAC2", "frac2"),
             ("MOD2", "mod2"),
         ]
+
         for i, (label, key) in enumerate(labels):
             ttk.Label(frm, text=label).grid(row=i // 2, column=(i % 2) * 2, sticky="w", padx=(0, 8), pady=2)
-            ttk.Label(frm, textvariable=self.summary_text_vars[key], width=28).grid(row=i // 2, column=(i % 2) * 2 + 1, sticky="w", pady=2)
+            ttk.Label(frm, textvariable=self.summary_text_vars[key], width=28).grid(
+                row=i // 2, column=(i % 2) * 2 + 1, sticky="w", pady=2
+            )
 
     def _build_actions_frame(self, parent):
         frm = ttk.LabelFrame(parent, text="Actions", padding=10)
         frm.pack(fill="x", pady=(0, 8))
 
-        ttk.Checkbutton(frm, text="Use INIT sequence", variable=self.first_init_var).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(frm, text="Force Full Initialization", variable=self.force_init_var).grid(row=0, column=0, sticky="w")
         ttk.Button(frm, text="Recalculate", command=self.recalculate).grid(row=0, column=1, padx=5)
         ttk.Button(frm, text="Refresh Lock", command=self.refresh_lock_status).grid(row=0, column=2, padx=5)
         ttk.Button(frm, text="Program Device", command=self.program_device).grid(row=0, column=3, padx=5)
-        ttk.Button(frm, text="Save Registers", command=self.save_registers).grid(row=0, column=4, padx=5)
-        ttk.Button(frm, text="Copy Register Dump", command=self.copy_register_dump).grid(row=0, column=5, padx=5)
+        ttk.Button(frm, text="Read Active Dump", command=self.read_active_dump).grid(row=0, column=4, padx=5)
+        ttk.Button(frm, text="Save Registers", command=self.save_registers).grid(row=0, column=5, padx=5)
+        ttk.Button(frm, text="Copy Register Dump", command=self.copy_register_dump).grid(row=0, column=6, padx=5)
 
     def _build_log_frame(self, parent):
         frm = ttk.LabelFrame(parent, text="Status", padding=10)
         frm.pack(fill="both", expand=True, pady=(0, 8))
-        self.log_box = tk.Text(frm, height=10, wrap="word")
+
+        self.log_box = tk.Text(frm, height=10, wrap="word", state="disabled")
         self.log_box.pack(fill="both", expand=True)
         self.log("Application started.")
 
@@ -583,16 +660,21 @@ class ADF5355DualGUI(tk.Tk):
             self.tree.insert("", "end", iid=str(i), values=(f"R{i}", "0x00000000", "0"))
 
     def log(self, text: str):
+        self.log_box.configure(state="normal")
         self.log_box.insert("end", text + "\n")
         self.log_box.see("end")
+        self.log_box.configure(state="disabled")
 
     def refresh_ports(self):
         ports = []
         if serial is not None:
             ports = [p.device for p in serial.tools.list_ports.comports()]
         self.port_combo["values"] = ports
-        if ports and not self.port_var.get():
-            self.port_var.set(ports[0])
+        if ports:
+            if self.port_var.get() not in ports:
+                self.port_var.set(ports[0])
+        else:
+            self.port_var.set("")
 
     def connect_port(self):
         port = self.port_var.get().strip()
@@ -610,7 +692,7 @@ class ADF5355DualGUI(tk.Tk):
             messagebox.showerror("Connection Error", str(e))
             self.log(f"Connection failed: {e}")
 
-    def disconnect_port(self):(self):
+    def disconnect_port(self):
         if self.pico:
             try:
                 self.pico.close()
@@ -628,13 +710,27 @@ class ADF5355DualGUI(tk.Tk):
 
     def build_config_from_ui(self) -> ADF5355Config:
         power_map = {"-4 dBm": 0b00, "-1 dBm": 0b01, "+2 dBm": 0b10, "+5 dBm": 0b11}
+
         cp_code = int(self.cp_code_var.get().replace("0b", ""), 2)
         mux_code = int(self.muxout_var.get(), 2)
         bleed_code = int(self.bleed_code_var.get())
+        r_counter = int(self.r_counter_var.get())
+        ref_hz = float(self.ref_freq_var.get()) * self.unit_scale(self.ref_units_var.get())
+
+        if cp_code < 0 or cp_code > 15:
+            raise ValueError("Charge Pump Code must be between 0 and 15")
+        if mux_code < 0 or mux_code > 7:
+            raise ValueError("MUXOUT code must be between 000 and 111")
+        if bleed_code < 0 or bleed_code > 255:
+            raise ValueError("Bleed Code must be between 0 and 255")
+        if r_counter < 1 or r_counter > 1023:
+            raise ValueError("R Counter must be between 1 and 1023")
+        if ref_hz <= 0:
+            raise ValueError("Reference frequency must be greater than 0")
 
         return ADF5355Config(
-            ref_in_hz=float(self.ref_freq_var.get()) * self.unit_scale(self.ref_units_var.get()),
-            r_counter=int(self.r_counter_var.get()),
+            ref_in_hz=ref_hz,
+            r_counter=r_counter,
             ref_doubler=self.ref_doubler_var.get(),
             ref_div2=self.ref_div2_var.get(),
             ref_mode_differential=self.ref_diff_var.get(),
@@ -652,16 +748,30 @@ class ADF5355DualGUI(tk.Tk):
     def get_request_values(self):
         freq_hz = float(self.freq_var.get()) * self.unit_scale(self.units_var.get())
         spacing_hz = float(self.channel_spacing_var.get()) * self.unit_scale(self.channel_spacing_units_var.get())
+
+        if freq_hz <= 0:
+            raise ValueError("Output frequency must be greater than 0")
+        if spacing_hz <= 0:
+            raise ValueError("Channel spacing must be greater than 0")
+
         return freq_hz, spacing_hz
 
+    def compute_current_settings(self):
+        cfg = self.build_config_from_ui()
+        freq_hz, spacing_hz = self.get_request_values()
+        builder = ADF5355RegisterBuilder(cfg)
+        summary = builder.calculate_summary(freq_hz, self.output_var.get(), spacing_hz)
+        regs = builder.build_registers(freq_hz, self.output_var.get(), cfg.rfouta_power_code, spacing_hz)
+        return cfg, freq_hz, spacing_hz, summary, regs
+
     def recalculate(self):
+        self.recalc_after_id = None
         try:
-            cfg = self.build_config_from_ui()
-            freq_hz, spacing_hz = self.get_request_values()
-            builder = ADF5355RegisterBuilder(cfg)
-            summary = builder.calculate_summary(freq_hz, self.output_var.get(), spacing_hz)
-            regs = builder.build_registers(freq_hz, self.output_var.get(), cfg.rfouta_power_code, spacing_hz)
+            cfg, freq_hz, spacing_hz, summary, regs = self.compute_current_settings()
             self.current_regs = regs
+            self.last_valid_settings = (cfg, freq_hz, spacing_hz, summary, regs)
+            self.last_recalc_error = None
+
             self.summary_text_vars["fpfd"].set(f"{summary['fpfd_hz']/1e6:.6f} MHz")
             self.summary_text_vars["vco"].set(f"{summary['vco_hz']/1e9:.9f} GHz")
             self.summary_text_vars["rfdiv"].set(str(summary["rf_divider"]))
@@ -671,44 +781,74 @@ class ADF5355DualGUI(tk.Tk):
             self.summary_text_vars["frac2"].set(str(summary["frac2"]))
             self.summary_text_vars["mod2"].set(str(summary["mod2"]))
             self.update_register_tree(regs)
+
+            if cfg.muxout_code != 0b110:
+                self.mux_warning_var.set("Warning: Lock readback requires MUXOUT = 110 (Digital Lock Detect).")
+            else:
+                self.mux_warning_var.set("")
+
         except Exception as e:
-            self.summary_text_vars["fpfd"].set("Error")
-            self.summary_text_vars["vco"].set("Error")
-            self.summary_text_vars["rfdiv"].set("Error")
-            self.summary_text_vars["feedback"].set("Error")
-            self.summary_text_vars["int"].set("Error")
-            self.summary_text_vars["frac1"].set("Error")
-            self.summary_text_vars["frac2"].set("Error")
-            self.summary_text_vars["mod2"].set("Error")
-            self.log(f"Recalculate error: {e}")
+            for key in self.summary_text_vars:
+                self.summary_text_vars[key].set("Error")
+            self.mux_warning_var.set("")
+            if str(e) != self.last_recalc_error:
+                self.log(f"Recalculate error: {e}")
+                self.last_recalc_error = str(e)
 
     def update_register_tree(self, regs: List[int]):
         for i, reg in enumerate(regs):
             self.tree.item(str(i), values=(f"R{i}", f"0x{reg:08X}", str(reg)))
 
     def on_param_change(self, event=None):
-        self.after(50, self.recalculate)
+        if self.recalc_after_id is not None:
+            try:
+                self.after_cancel(self.recalc_after_id)
+            except Exception:
+                pass
+        self.recalc_after_id = self.after(80, self.recalculate)
 
     def program_device(self):
         if self.pico is None:
             messagebox.showerror("Not Connected", "Connect to the Pico first.")
             return
 
+        try:
+            cfg, freq_hz, spacing_hz, summary, regs = self.compute_current_settings()
+            self.current_regs = regs
+            self.last_valid_settings = (cfg, freq_hz, spacing_hz, summary, regs)
+            self.update_register_tree(regs)
+
+            if cfg.muxout_code != 0b110:
+                proceed = messagebox.askyesno(
+                    "MUXOUT Warning",
+                    "MUXOUT is not set to 110 (Digital Lock Detect).\n\n"
+                    "The lock indicators may be invalid.\n\n"
+                    "Continue programming anyway?"
+                )
+                if not proceed:
+                    return
+
+        except Exception as e:
+            messagebox.showerror("Invalid Settings", str(e))
+            return
+
+        board = self.board_var.get()
+        regs_snapshot = list(self.current_regs)
+        force_init = self.force_init_var.get()
+
         def worker():
             try:
-                self.recalculate()
-                board = self.board_var.get()
                 reply = self.pico.select_board(board)
                 if reply:
                     self.serial_queue.put(("log", f"Board select reply: {reply}"))
 
-                replies = self.pico.write_registers(self.current_regs)
+                replies = self.pico.write_registers(regs_snapshot)
                 for rep in replies:
                     if rep:
                         self.serial_queue.put(("log", rep))
-                self.serial_queue.put(("log", f"Registers written to board {board}."))
+                self.serial_queue.put(("log", f"Registers staged to board {board}."))
 
-                if self.first_init_var.get():
+                if force_init:
                     init_reply = self.pico.init_device()
                     if init_reply:
                         self.serial_queue.put(("log", init_reply))
@@ -722,6 +862,7 @@ class ADF5355DualGUI(tk.Tk):
                     self.serial_queue.put(("lock", lock_reply))
 
                 self.serial_queue.put(("status", f"Programmed Board {board}"))
+
             except Exception as e:
                 self.serial_queue.put(("error", str(e)))
 
@@ -738,6 +879,25 @@ class ADF5355DualGUI(tk.Tk):
                     self.serial_queue.put(("lock", lock_reply))
             except Exception as e:
                 self.serial_queue.put(("log", f"Lock read error: {e}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def read_active_dump(self):
+        if self.pico is None:
+            messagebox.showerror("Not Connected", "Connect to the Pico first.")
+            return
+
+        def worker():
+            try:
+                board = self.board_var.get()
+                reply = self.pico.select_board(board)
+                if reply:
+                    self.serial_queue.put(("log", f"Board select reply: {reply}"))
+                lines = self.pico.dump_active()
+                for line in lines:
+                    self.serial_queue.put(("log", line))
+            except Exception as e:
+                self.serial_queue.put(("error", str(e)))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -758,6 +918,7 @@ class ADF5355DualGUI(tk.Tk):
                     messagebox.showerror("Programming Error", payload)
         except queue.Empty:
             pass
+
         self.after(150, self.process_serial_queue)
 
     def set_lock_display(self, board: str, state):
@@ -785,7 +946,6 @@ class ADF5355DualGUI(tk.Tk):
                 label.configure(style="LockOff.TLabel")
 
     def apply_lock_status(self, text: str):
-        # Expected format: LOCK:A=1:B=0
         try:
             if text.startswith("LOCK:"):
                 parts = text.split(":")
@@ -797,39 +957,53 @@ class ADF5355DualGUI(tk.Tk):
                     elif part.startswith("B="):
                         b_val = part.split("=")[1].strip()
                 if a_val is not None:
-                    self.set_lock_display("A", a_val == '1')
+                    self.set_lock_display("A", a_val == "1")
                 if b_val is not None:
-                    self.set_lock_display("B", b_val == '1')
+                    self.set_lock_display("B", b_val == "1")
+
             elif ":LOCKED" in text or ":UNLOCKED" in text:
                 parts = text.split(":")
                 if len(parts) >= 3:
                     board = parts[1].strip()
                     state = parts[2].strip()
-                    disp = "LOCK" if state == "LOCKED" else "UNLOCK"
                     if board == "A":
                         self.set_lock_display("A", state == "LOCKED")
                     elif board == "B":
                         self.set_lock_display("B", state == "LOCKED")
+
         except Exception as e:
             self.log(f"Lock parse error: {e} :: {text}")
 
-    def copy_register_dump(self):(self):
+    def copy_register_dump(self):
         dump = "\n".join([f"R{i:02d} = 0x{reg:08X} ({reg})" for i, reg in enumerate(self.current_regs)])
         self.clipboard_clear()
         self.clipboard_append(dump)
         self.log("Register dump copied to clipboard.")
 
     def save_registers(self):
-        path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")])
+        path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")]
+        )
         if not path:
             return
+
         with open(path, "w", encoding="utf-8") as f:
             f.write("ADF5355 Register Dump\n")
             f.write(f"Board: {self.board_var.get()}\n")
             f.write(f"Output: RFOUT{self.output_var.get()}\n\n")
             for i, reg in enumerate(self.current_regs):
                 f.write(f"R{i:02d} = 0x{reg:08X} ({reg})\n")
+
         self.log(f"Saved register dump to {path}")
+
+    def on_close(self):
+        try:
+            if self.pico:
+                self.pico.close()
+        except Exception:
+            pass
+        self.destroy()
 
 
 if __name__ == "__main__":
