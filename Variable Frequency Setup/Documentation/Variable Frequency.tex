@@ -1,0 +1,40 @@
+\documentclass{article}
+\usepackage{graphicx} % Required for inserting images
+\usepackage[toc]{glossaries}
+\usepackage{float}%for graphics positions
+\usepackage{siunitx}%For SI units
+\usepackage{hyperref}%For Hyperlinks
+\usepackage{textcomp}%For text styles like color and font
+\usepackage{subfig} %for subfigures. not used often
+\usepackage{subcaption}% for subcaptions. not used often
+\numberwithin{figure}{subsection} %sets figure numbering to x.y.z. section.subsection.fig#. can be changed to x.y. or x
+\makeglossaries %generates the glossary
+
+\begin{document}
+\graphicspath{{}{}} %Sets path for graphics in a different folder
+	
+\input{Title} 
+\newpage
+\tableofcontents
+\newpage
+
+%Content
+
+
+
+
+
+%End Content
+
+	
+\newpage
+\input{Gloss.tex}
+
+\nocite{}
+
+\addcontentsline{toc}{section}{References} %adds a Table of contents line for glossary
+
+\bibliographystyle{plain} %bibliography stile
+\bibliography{References} %creates bibliography from .bib file
+\end{document}
+
