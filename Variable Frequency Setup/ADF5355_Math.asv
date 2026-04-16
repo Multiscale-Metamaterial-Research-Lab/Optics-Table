@@ -1,0 +1,37 @@
+clc
+clear
+format shortEng
+Fref=122.8e6;
+N=30:114;
+Int_out=N*Fref
+%%
+clc
+clear
+format shortENG
+
+D = 0 %doubler bit high or low. Reg.4
+R = 1 %Reference Division factor. 1--2^10=
+T = 0 %Reference divide by 2 bit (0 or 1) Reg.4
+
+RF_Div = 1
+
+REFin=122.88e6
+
+Fpfd = REFin*((1+D)/(R*(1+T)))
+Fchsp = 500e3 %Desired Channel Spacing. 
+              % Pretty sure this is the minimum steps that you'd like to be able to take
+
+VCO = 8e9/2 % Desired VCO. RFoutA=VCO/RF_Div RFoutB=VCO*2
+N=VCO/Fpfd
+INT=floor(N)
+FRAC=N-INT
+
+MOD1 = 2^24 %Fixed 24-bit modulus 24 bits = MOD1
+MOD2 = Fpfd/(gcd(Fpfd,Fchsp)) %14- bit auxilaiary fractional modulus 2--16,363
+FRAC1 = floor(MOD1*FRAC)
+
+Remainder=(MOD1*FRAC)-FRAC1
+
+FRAC2 =Remainder * MOD2
+
+isequal(VCO, INT+((FRAC1+(FRAC2/MOD2))/MOD1)*Fpfd/RF_Div)
