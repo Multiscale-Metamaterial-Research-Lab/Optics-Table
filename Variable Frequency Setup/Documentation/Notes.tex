@@ -1,0 +1,26 @@
+\section{Notes}
+\begin{itemize}
+	\item prescaler: another downconverter in the feedback path. " For example, let’s assume that a 900 MHz output is required with
+	10 kHz spacing. A 10 MHz reference frequency might be used, with the R-Divider set at
+	1000. Then, the N-value in the feedback would need to be of the order of 90,000. This
+	would mean at least a 17-bit counter capable of operating at an input frequency of
+	900 MHz.
+	To handle this range, it makes sense to precede the programmable counter with a fixed
+	counter element to bring the very high input frequency down to a range at which standard
+	CMOS counters will operate. This counter, called a prescaler," \cite{RF_IFCircuits}(4.56). Degrades resolution.
+	\item Integer N: for high resolution, small reference is needed, but large N. Large N means Large phase noise. Low reference frequency limits PLL lock time. \cite{RF_IFCircuits} (4.59)
+	\item Fractional N: "It is possible to implement division by a fraction over a long period of time by alternatey dividing by two integers(divide by 2.5 can be achieved by dividing
+	successively by 2 and 3). So, how does one divide by X or (X + 1) (assuming that the
+	fractional number is between these two values)? Well, the fractional part of the number
+	can be allowed to accumulate at the reference frequency rate. \cite{RF_IFCircuits}(4.59). Frac N has higher spurious noise however.
+	\item ADF5355 Math and equations: \cite{ADF5355}
+	\item Channel Spacing: "By changing the value N, the VCO can be
+	tuned across the frequency band of interest. The only constraint to the frequency output
+	of the system is that the minimum frequency resolution, or minimum channel spacing, is
+	equal to Fr. $$Channel Spacing=F_{VCO}/N=F_r$$(Fr=Frequency Reference) \cite{FracVsInt}
+	\item Phase Noise:Multiplication by N raises the signals phase noise by $20Log(N)$ dB. \cite{FracVsInt}
+	\item "The principle of fractionality is
+	therefore a result of averaging, as there is no device that can divide by a fraction." \cite{FracVsInt}
+	\item Fractional N can be much faster because the reference frequency is faster too. \cite{FracVsInt} PG.40
+	\item Fractional N causes spurious noise because it is rapidly changing N values. N and N+1
+\end{itemize}
